@@ -1,0 +1,4 @@
+discord.py
+jsons
+asyncio
+aiohttp

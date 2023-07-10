@@ -1,0 +1,548 @@
+﻿//
+// Kernel
+//
+#pragma kernel CSMain
+
+//
+// Output texture
+// 
+RWTexture2D<float4> Result;
+
+//
+// Camera data
+//
+float4x4 _CameraToWorldMatrix;
+float4x4 _WorldToCameraMatrix;
+float4x4 _InverseProjectionMatrix;
+
+//
+// Shader constants
+//
+#define MAX_TRAVEL 200
+#define EPSILON 1e-8
+
+//
+// Ray structure
+//
+struct Ray
+{
+    float3 origin;
+    float3 direction;
+
+    float4 energy;
+};
+
+//
+// Ray constructors
+//
+Ray CreateRay(float3 origin, float3 direction) {
+    Ray ray;
+
+    ray.origin = origin;
+    ray.direction = direction;
+
+    ray.energy = float4(0, 0, 0, 0);
+
+    return ray;
+}
+
+Ray CreateRayFromViewPoint(float2 vPoint) {
+    Ray ray;
+    ray.origin = mul(_CameraToWorldMatrix, float4(0, 0, 0, 1)).xyz;
+
+    ray.direction = mul(_InverseProjectionMatrix, float4(vPoint, 0, 1)).xyz;
+    ray.direction = mul(_CameraToWorldMatrix, float4(ray.direction, 0)).xyz;
+    ray.direction = normalize(ray.direction);
+
+    ray.energy = float4(0, 0, 0, 0);
+
+    return ray;
+}
+
+//
+// AABB structure
+//
+struct AABB {
+    float3 min, max;
+};
+
+//
+// AABB <-> Ray Intersection
+//
+// Based on https://medium.com/@bromanz/another-view-on-the-classic-ray-aabb-intersection-algorithm-for-bvh-traversal-41125138b525
+bool RayAABBIntersect(Ray ray, AABB aabb, float tmin, float tmax) {
+    float3 invD = rcp(ray.direction);
+    float3 t0s = (aabb.min - ray.origin) * invD;
+    float3 t1s = (aabb.max - ray.origin) * invD;
+
+    float3 tsmaller = min(t0s, t1s);
+    float3 tbigger = max(t0s, t1s);
+
+    tmin = max(tmin, max(tsmaller[0], max(tsmaller[1], tsmaller[2])));
+    tmax = min(tmax, min(tbigger[0], min(tbigger[1], tbigger[2])));
+
+    return (tmin < tmax);
+}
+
+//
+// Triangle structure
+//
+struct Triangle {
+    float3 v1, v2, v3;
+    float3 n1, n2, n3;
+    float2 uv1, uv2, uv3;
+};
+
+//
+// Triangle <-> Ray intersection
+//
+bool RayTriangleIntersect(Ray ray, float3 v1, float3 v2, float3 v3, inout float3 t, inout float u, inout float v) {
+    float3 edge1, edge2;
+
+    edge1 = v2 - v1;
+    edge2 = v3 - v1;
+
+    float3 perpendicular;
+    float determinant;
+
+    perpendicular = cross(ray.direction, edge2);
+    determinant = dot(edge1, perpendicular);
+
+    // Ignore this face if it reaches near Epsilon
+    if (determinant < EPSILON)
+        return false;
+
+    float ideterminant = 1.0 / determinant;
+
+    float3 tvec = ray.origin - v1;
+
+    u = dot(tvec, perpendicular) * ideterminant;
+
+    if (u < 0.0f || u > 1.0f)
+        return false;
+
+    float3 q = cross(tvec, edge1);
+
+    v = dot(ray.direction, q) * ideterminant;
+
+    if (v < 0.0f || u + v > 1.0f)
+        return false;
+
+    t = dot(edge2, q) * ideterminant;
+
+    if (dot(edge2, q) * ideterminant > EPSILON)
+        return true;
+
+    return false;
+}
+
+//
+// Model structure
+//
+struct Model {
+    int triangleBegin, triangleCount;
+    float4x4 transform, inverseTranspose;
+    AABB aabb;
+    float4 color;
+    float gloss, metal;
+};
+
+//
+// Model info buffers
+//
+StructuredBuffer<Model> _WorldModels;
+StructuredBuffer<Triangle> _WorldTriangles;
+
+//
+// Noiser
+//
+#define NOISER_LOW_THRESHOLD 0.5
+float2 _SobelCoords;
+
+float rand(float2 st) { return frac(sin(dot(st.xy, float2(12.9898, 78.233))) * 43758.5453123); }
+float rand(float n) { return frac(sin(n) * 43758.5453123); }
+
+//
+// Light structure
+//
+struct Light {
+    float3 pos;
+    float strength, range, radius;
+    float4 color;
+    uint type;
+};
+
+//
+// Light buffer
+//
+StructuredBuffer<Light> _WorldLights;
+
+//
+// Shadowing
+//
+float CalculateShadow(float3 position, float3 scatter) {
+    float shadow = 0;
+
+    uint lights, lightStride;
+    _WorldLights.GetDimensions(lights, lightStride);
+
+    uint models, modelStride;
+    _WorldModels.GetDimensions(models, modelStride);
+
+    float u, v;
+    float3 travel;
+    
+    int totalShadows = 0;
+
+    for (uint l = 0; l < lights; l++) {
+        Light light = _WorldLights[l];
+
+        float3 direction = normalize(light.pos - position);
+        if (_WorldLights[l].type == 1) {
+            direction = normalize(-_WorldLights[l].pos);
+        }
+
+        float lDistance = distance(position, _WorldLights[l].pos);
+
+        float radius = light.radius;
+        
+        if (light.type != 1) {
+            radius *= pow(lDistance, 2);
+        }
+        else
+            lDistance = 100;
+
+        float3 offset = scatter * radius;
+        Ray shadowRay = CreateRay(position + offset, normalize(position - light.pos));
+
+        float lastDepth = MAX_TRAVEL;
+        bool shadowed = false;
+        for (uint m = 0; m < models; m++) {
+            Model model = _WorldModels[m];
+
+            if (RayAABBIntersect(shadowRay, model.aabb, 0.0, MAX_TRAVEL)) {
+                for (uint t = 0; t < (uint)model.triangleCount; t++) {
+                    uint actual = model.triangleBegin + t;
+                    Triangle tri = _WorldTriangles[actual];
+
+                    //Result[id.xy] = float4(RayAABBIntersect(directRay, _WorldModels[0].aabb, 0, MAX_TRAVEL).xxx, 1);
+                    float3 v1 = mul(model.transform, float4(tri.v1, 1)).xyz;
+                    float3 v2 = mul(model.transform, float4(tri.v2, 1)).xyz;
+                    float3 v3 = mul(model.transform, float4(tri.v3, 1)).xyz;
+
+                    bool didIntersect = RayTriangleIntersect(shadowRay, v1, v2, v3, travel, u, v);
+
+                    float depth = length(travel);
+
+                    if (didIntersect && depth < lastDepth) {
+                        float3 sPoint = (v1 * (1 - u - v)) + (v2 * u) + (v3 * v);
+                        if (distance(position, sPoint) <= lDistance) {
+                            shadow = 1;
+                        }
+                        
+                        lastDepth = depth;
+                    }
+                }
+            }
+        }
+    }
+
+    return shadow;
+}
+
+//
+// Point attenuation
+//
+//https://imdoingitwrong.wordpress.com/tag/glsl/
+float SphereAtten(float3 position, float3 lightPosition, float3 normal, float range, float intensity) {
+    float r = range / 2;
+    float3 L = lightPosition - position;
+    float dist = length(L);
+    float d = max(dist - r, 0);
+    L /= dist;
+
+    float denom = d / r + 1;
+    float atten = 1 / (denom * denom);
+
+    float cutoff = 0.005;
+    atten = max((atten - cutoff / (1 - cutoff)) * intensity, 0);
+    return atten;
+}
+
+//
+// Lighting
+//
+float4 CalculateLighting(float3 position, float3 normal, float3 scatter) {
+    float4 lighting = (0.0).xxxx;
+
+    uint lights, stride;
+    _WorldLights.GetDimensions(lights, stride);
+
+    uint models, modelStride;
+    _WorldModels.GetDimensions(models, modelStride);
+    
+    for (int l = 0; l < lights; l++) {
+        bool abort = false;
+        
+        float3 direction = normalize(_WorldLights[l].pos - position);
+        float atten = 0;        
+        float lDistance = distance(position, _WorldLights[l].pos);
+        
+        
+        if (_WorldLights[l].type == 1)
+        {
+            direction = normalize(_WorldLights[l].pos);
+            atten = _WorldLights[l].strength;
+            lDistance = MAX_TRAVEL;
+        }
+        
+        float radius = _WorldLights[l].radius;
+        float3 offset = scatter * radius;
+        Ray shadowRay = CreateRay(position, normalize(direction + offset));
+
+        for (uint m = 0; m < models; m++)
+        {
+            Model model = _WorldModels[m];
+            
+            if (RayAABBIntersect(shadowRay, model.aabb, 0, MAX_TRAVEL))
+            {   
+                [loop]
+                for (uint t = 0; t < (uint) model.triangleCount; t++)
+                {
+                    uint actual = model.triangleBegin + t;
+                    Triangle tri = _WorldTriangles[actual];
+
+                    float3 v1 = mul(model.transform, float4(tri.v1, 1)).xyz;
+                    float3 v2 = mul(model.transform, float4(tri.v2, 1)).xyz;
+                    float3 v3 = mul(model.transform, float4(tri.v3, 1)).xyz;
+
+                    float3 travel;
+                    float u, v;
+                    bool didIntersect = RayTriangleIntersect(shadowRay, v1, v2, v3, travel, u, v);
+                    
+                    if (didIntersect)
+                    {
+                        float3 sPoint = (v1 * (1 - u - v)) + (v2 * u) + (v3 * v);
+                        if (distance(position, sPoint) <= lDistance)
+                        {
+                            abort = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if (abort)
+            continue;
+
+        float lDot = saturate(dot(normal, direction));
+
+        if (_WorldLights[l].type == 2) {
+            atten = SphereAtten(position, _WorldLights[l].pos, normal, _WorldLights[l].range, _WorldLights[l].strength);
+        }
+
+        lighting += atten * lDot * _WorldLights[l].color;
+    }
+
+    return lighting;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID) {
+    //
+    // Setup
+    //
+    uint resX, resY;
+    Result.GetDimensions(resX, resY);
+
+    // Create a UV for projecting rays from
+    float2 uv = float2((id.xy + float2(0.5, 0.5)) / float2(resX, resY));
+    
+    // Sobel noiser, that makes us abort early if we aren't doing anything
+    float sobel = rand(uv + _SobelCoords);
+    if (sobel >= NOISER_LOW_THRESHOLD)
+        return;
+
+    float2 remapUV = uv;
+    
+    remapUV *= 2;
+    remapUV -= 1;
+
+    float u, v;
+    float3 travel;
+
+    //
+    // Initial pass
+    //
+    uint models, modelStride;
+    _WorldModels.GetDimensions(models, modelStride);
+
+    Ray directRay = CreateRayFromViewPoint(remapUV);
+
+    float3 hPoint, hNormal;
+	float hGloss, hMetal;
+
+	bool initialIntersect = false;
+    
+    float lastDepth = MAX_TRAVEL;
+    for (uint m; m < models; m++) {
+        Model model = _WorldModels[m];
+
+        if (RayAABBIntersect(directRay, model.aabb, 0, MAX_TRAVEL)) {
+            for (uint t = 0; t < (uint)model.triangleCount; t++) {
+                uint actual = model.triangleBegin + t;
+                Triangle tri = _WorldTriangles[actual];
+
+                //Result[id.xy] = float4(RayAABBIntersect(directRay, _WorldModels[0].aabb, 0, MAX_TRAVEL).xxx, 1);
+                float3 v1 = mul(model.transform, float4(tri.v1, 1)).xyz;
+                float3 v2 = mul(model.transform, float4(tri.v2, 1)).xyz;
+                float3 v3 = mul(model.transform, float4(tri.v3, 1)).xyz;
+
+                bool didIntersect = RayTriangleIntersect(directRay, v1, v2, v3, travel, u, v);
+
+                float depth = length(travel);
+
+                if (didIntersect && depth < lastDepth) {
+                    directRay.energy = model.color;
+                    lastDepth = depth;
+                    initialIntersect = true;
+
+                    hPoint = (v1 * (1 - u - v)) + (v2 * u) + (v3 * v);
+
+                    float3 n1 = normalize(mul(model.inverseTranspose, float4(tri.n1, 1)).xyz);
+                    float3 n2 = normalize(mul(model.inverseTranspose, float4(tri.n2, 1)).xyz);
+                    float3 n3 = normalize(mul(model.inverseTranspose, float4(tri.n3, 1)).xyz);
+                    hNormal = (n1 * (1 - u - v)) + (n2 * u) + (n3 * v);
+					hGloss = model.gloss;
+					hMetal = model.metal;
+				}
+            }
+        }
+    }
+
+    if (!initialIntersect) {
+        Result[id.xy] = float4(0, 0, 0, 1);
+        return;
+    }
+    
+    if (directRay.energy.r == 1 && directRay.energy.b != 1)
+    {
+        Ray refractRay = CreateRay(hPoint, refract(directRay.direction, hNormal, 0.9));
+        refractRay.origin += refractRay.direction * 0.01;
+        
+        float3 rPoint, rNormal;
+        
+        float lastDepth = MAX_TRAVEL;
+        for (uint m; m < models; m++)
+        {
+            Model model = _WorldModels[m];
+
+            if (RayAABBIntersect(refractRay, model.aabb, 0, MAX_TRAVEL))
+            {
+                for (uint t = 0; t < (uint) model.triangleCount; t++)
+                {
+                    uint actual = model.triangleBegin + t;
+                    Triangle tri = _WorldTriangles[actual];
+
+                //Result[id.xy] = float4(RayAABBIntersect(directRay, _WorldModels[0].aabb, 0, MAX_TRAVEL).xxx, 1);
+                    float3 v1 = mul(model.transform, float4(tri.v1, 1)).xyz;
+                    float3 v2 = mul(model.transform, float4(tri.v2, 1)).xyz;
+                    float3 v3 = mul(model.transform, float4(tri.v3, 1)).xyz;
+
+                    bool didIntersect = RayTriangleIntersect(refractRay, v1, v2, v3, travel, u, v);
+
+                    float depth = length(travel);
+
+                    if (didIntersect && depth < lastDepth)
+                    {
+                        refractRay.energy = model.color;
+                        lastDepth = depth;
+                        initialIntersect = true;
+                        
+                        rPoint = (v1 * (1 - u - v)) + (v2 * u) + (v3 * v);
+
+                        float3 n1 = normalize(mul(model.inverseTranspose, float4(tri.n1, 1)).xyz);
+                        float3 n2 = normalize(mul(model.inverseTranspose, float4(tri.n2, 1)).xyz);
+                        float3 n3 = normalize(mul(model.inverseTranspose, float4(tri.n3, 1)).xyz);
+                        rNormal = (n1 * (1 - u - v)) + (n2 * u) + (n3 * v);
+                    }
+                }
+            }
+        }
+        
+        float3 scatter = float3(rand(uv + _SobelCoords + (0.1).xx), rand(uv + _SobelCoords + (0.2).xx), rand(uv + _SobelCoords + (0.3).xx));
+        scatter -= 0.5;
+        scatter *= 2;
+        
+        Result[id.xy] = CalculateLighting(rPoint, rNormal, scatter) * refractRay.energy;
+        return;
+    }
+
+    
+    //
+    // Lighting
+    //
+    float3 scatter = float3(rand(uv + _SobelCoords + (0.1).xx), rand(uv + _SobelCoords + (0.2).xx), rand(uv + _SobelCoords + (0.3).xx));
+    scatter -= 0.5;
+    scatter *= 2;
+    
+    float4 lighting = CalculateLighting(hPoint, hNormal, scatter);
+    
+    //
+    // Gloss (reflection)
+    //
+	Ray glossRay = CreateRay(hPoint + (hNormal * 0.005f), reflect(directRay.direction, hNormal) + scatter * pow(1 - hGloss, 2));
+    
+	if (hGloss != 0) {
+		lastDepth = MAX_TRAVEL;
+		for (uint m; m < models; m++) {
+			Model model = _WorldModels[m];
+
+			if (RayAABBIntersect(glossRay, model.aabb, 0, MAX_TRAVEL)) {
+				for (uint t = 0; t < (uint) model.triangleCount; t++) {
+					uint actual = model.triangleBegin + t;
+					Triangle tri = _WorldTriangles[actual];
+
+					float3 v1 = mul(model.transform, float4(tri.v1, 1)).xyz;
+					float3 v2 = mul(model.transform, float4(tri.v2, 1)).xyz;
+					float3 v3 = mul(model.transform, float4(tri.v3, 1)).xyz;
+
+					bool didIntersect = RayTriangleIntersect(glossRay, v1, v2, v3, travel, u, v);
+
+					float depth = length(travel);
+
+					if (didIntersect && depth < lastDepth) {
+						float3 n1 = normalize(mul(model.inverseTranspose, float4(tri.n1, 1)).xyz);
+						float3 n2 = normalize(mul(model.inverseTranspose, float4(tri.n2, 1)).xyz);
+						float3 n3 = normalize(mul(model.inverseTranspose, float4(tri.n3, 1)).xyz);
+                        
+						float3 gPoint = (v1 * (1 - u - v)) + (v2 * u) + (v3 * v);
+						float3 gNormal = (n1 * (1 - u - v)) + (n2 * u) + (n3 * v);
+                        glossRay.energy = model.color * CalculateLighting(gPoint, gNormal, scatter);
+						lastDepth = depth;
+					}
+				}
+			}
+		}
+	}
+    
+    //
+    // Final blending
+    //
+    float reflectFac = hGloss;
+    float3 eyePosition = mul(_CameraToWorldMatrix, float4(0, 0, 0, 1)).xyz;
+    
+    reflectFac *= max(0.2, 1 - saturate(dot(hNormal, normalize(eyePosition - hPoint))));
+    float4 diffuse = directRay.energy * lighting * lerp(1, glossRay.energy, reflectFac);
+    
+    //
+    // Result
+    //
+    float4 pre = lerp(diffuse, glossRay.energy, hMetal);
+    pre = pre / (pre + 1.0);
+    pre = pow(pre, 1.0 / 2.2);
+    
+    Result[id.xy] = pre;
+    //Result[id.xy] = float4(hNormal, 1);
+}

@@ -1,0 +1,265 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{269aac1b-93a8-4839-92ba-302b146c94aa}</ProjectGuid>
+    <RootNamespace>Zealot</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>Quartz</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <CharacterSet>NotSet</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>NotSet</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <CharacterSet>NotSet</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>ClangCL</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>NotSet</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <LinkIncremental>true</LinkIncremental>
+    <OutDir>$(SolutionDir)build\binaries\$(Configuration)_$(Platform)\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\$(ProjectName)_$(Configuration)_$(Platform)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <LinkIncremental>false</LinkIncremental>
+    <OutDir>$(SolutionDir)build\binaries\$(Configuration)_$(Platform)\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\$(ProjectName)_$(Configuration)_$(Platform)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <LinkIncremental>true</LinkIncremental>
+    <OutDir>$(SolutionDir)build\binaries\$(Configuration)_$(Platform)\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\$(ProjectName)_$(Configuration)_$(Platform)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>false</LinkIncremental>
+    <OutDir>$(SolutionDir)build\binaries\$(Configuration)_$(Platform)\</OutDir>
+    <IntDir>$(SolutionDir)build\obj\$(ProjectName)_$(Configuration)_$(Platform)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WINDOWS;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalIncludeDirectories>./include;./deps;./deps/submodules;./deps/submodules/glm;./src</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>./lib/OpenAL/OpenAL32.lib;./lib/GLEW/x64/glew32s.lib;./lib/GLFW/glfw3.lib;opengl32.lib;PathCch.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/IGNORE:LNK4099 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /E /C $(ProjectDir)data\ $(OutputPath)Data\</Command>
+    </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WINDOWS;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <AdditionalIncludeDirectories>./include;./deps;./deps/submodules;./deps/submodules/glm;./src</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalDependencies>./lib/OpenAL/OpenAL32.lib;./lib/GLEW/x64/glew32s.lib;./lib/GLFW/glfw3.lib;opengl32.lib;PathCch.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ProgramDatabaseFile />
+      <AdditionalOptions>/IGNORE:LNK4099 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /E /C $(ProjectDir)data\ $(OutputPath)Data\</Command>
+    </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WINDOWS;GLEW_STATIC;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>./include;./deps;./deps/submodules;./deps/submodules/glm;./src</AdditionalIncludeDirectories>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>./lib/OpenAL/OpenAL32.lib;./lib/GLEW/x64/glew32s.lib;./lib/GLFW/glfw3.lib;opengl32.lib;PathCch.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/IGNORE:LNK4099 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /E /C $(ProjectDir)data\ $(OutputPath)Data\</Command>
+    </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WINDOWS;GLEW_STATIC;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>./include;./deps;./deps/submodules;./deps/submodules/glm;./src</AdditionalIncludeDirectories>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalDependencies>./lib/OpenAL/OpenAL32.lib;./lib/GLEW/x64/glew32s.lib;./lib/GLFW/glfw3.lib;opengl32.lib;PathCch.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <ProgramDatabaseFile />
+      <AdditionalOptions>/IGNORE:LNK4099 %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /E /C $(ProjectDir)data\ $(OutputPath)Data\</Command>
+    </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="deps\submodules\imgui\backends\imgui_impl_glfw.cpp" />
+    <ClCompile Include="deps\submodules\imgui\backends\imgui_impl_opengl3.cpp" />
+    <ClCompile Include="deps\submodules\imgui\imgui.cpp" />
+    <ClCompile Include="deps\submodules\imgui\imgui_draw.cpp" />
+    <ClCompile Include="deps\submodules\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="src\rendering\base\material.cpp" />
+    <ClCompile Include="src\entities\entity.cpp" />
+    <ClCompile Include="src\debug\console\concommand.cpp" />
+    <ClCompile Include="src\debug\gizmos\gizmobillboard.cpp" />
+    <ClCompile Include="src\filesystem\datamanager.cpp" />
+    <ClCompile Include="src\rendering\base\light.cpp" />
+    <ClCompile Include="src\debug\debugmenu.cpp" />
+    <ClCompile Include="src\rendering\base\camera.cpp" />
+    <ClCompile Include="src\rendering\base\model.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\rendering\base\renderer.cpp" />
+    <ClCompile Include="src\rendering\gl_renderer\glsl\glsl_shader.cpp" />
+    <ClCompile Include="src\rendering\gl_renderer\gl_model.cpp" />
+    <ClCompile Include="src\rendering\gl_renderer\gl_renderer.cpp" />
+    <ClCompile Include="src\rendering\base\world.cpp" />
+    <ClCompile Include="src\rendering\base\texture.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="deps\audiofile\AudioFile.h" />
+    <ClInclude Include="deps\stb\stb_image.h" />
+    <ClInclude Include="deps\submodules\imgui\backends\imgui_impl_glfw.h" />
+    <ClInclude Include="deps\submodules\imgui\backends\imgui_impl_opengl3.h" />
+    <ClInclude Include="deps\submodules\imgui\imgui.h" />
+    <ClInclude Include="src\debug\error_window.hpp" />
+    <ClInclude Include="src\rendering\base\material.hpp" />
+    <ClInclude Include="src\entities\entity.hpp" />
+    <ClInclude Include="src\debug\console\concommand.hpp" />
+    <ClInclude Include="src\debug\gizmos\gizmobillboard.hpp" />
+    <ClInclude Include="src\filesystem\agnosticfs.hpp" />
+    <ClInclude Include="src\debug\common.hpp" />
+    <ClInclude Include="src\filesystem\datamanager.hpp" />
+    <ClInclude Include="src\rendering\base\light.hpp" />
+    <ClInclude Include="src\debug\debugmenu.hpp" />
+    <ClInclude Include="src\rendering\base\camera.hpp" />
+    <ClInclude Include="src\rendering\base\model.hpp" />
+    <ClInclude Include="resources\resource.h" />
+    <ClInclude Include="src\common.hpp" />
+    <ClInclude Include="src\rendering\base\renderer.hpp" />
+    <ClInclude Include="src\rendering\gl_renderer\glsl\glsl_shader.hpp" />
+    <ClInclude Include="src\rendering\gl_renderer\gl_model.hpp" />
+    <ClInclude Include="src\rendering\gl_renderer\gl_renderer.hpp" />
+    <ClInclude Include="src\rendering\base\world.hpp" />
+    <ClInclude Include="src\threading\agnosticthread.hpp" />
+    <ClInclude Include="src\rendering\base\texture.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="resources\Zealot.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="resources\icon1.ico" />
+    <Image Include="resources\editor.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <Library Include="lib\GLEW\x64\glew32s.lib" />
+    <Library Include="lib\GLFW\glfw3.lib" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

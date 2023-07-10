@@ -1,0 +1,786 @@
+﻿//
+// Kernels
+//
+#pragma kernel HelloTriangleKernel
+
+//
+// Includes
+//
+#include "Include/CommonUtils.hlsl"
+
+#include "Include/RTStructures.hlsl"
+#include "Include/RTSky.hlsl"
+#include "Include/RTPBR.hlsl"
+
+// Shapes
+#include "Include/RTTriangle.hlsl"
+#include "Include/RTSphere.hlsl"
+#include "Include/RTAABB.hlsl"
+
+//
+// Optionals
+//
+#pragma multi_compile _ _USE_RT_NOISE_TEX
+#pragma multi_compile _ _TEMPORAL_SAMPLING
+#pragma multi_compile _ _USE_IBL_BRDF
+
+#define SHADOW_SAMPLES 1
+
+#define REFLECTION_SAMPLES 1
+#define REFLECTION_BOUNCES 1
+
+#define GI_SAMPLES 1
+#define GI_BOUNCES 1
+
+//#define SAMPLE_GI_IN_REFLECTION
+//#define SAMPLE_FOG_IN_REFLECTION
+#define REFLECTION_FOG_BOUNCE_CAP -1
+
+#define VOLUME_GI_SAMPLES 1
+#define VOLUME_GI_BOUNCES 1
+#define VOLUME_SHADOW_SAMPLES 1
+#define VOLUME_FOG_SCATTER _RTFogParams.w
+#define VOLUME_COLOR _RTFogParams.xyz
+
+#define VOLUME_STEPS 4
+#define VOLUME_FAR 50
+
+//#define DIRECT_ONLY
+//#define FOG_ONLY
+//#define GI_ONLY
+
+#if defined(DIRECT_ONLY) || defined(FOG_ONLY)
+
+#if !defined(FOG_ONLY)
+#undef VOLUME_GI_SAMPLES
+#define VOLUME_GI_SAMPLES 0
+
+#undef VOLUME_SHADOW_SAMPLES
+#define VOLUME_SHADOW_SAMPLES 0
+
+#undef VOLUME_STEPS
+#define VOLUME_STEPS 0
+#endif
+
+#undef GI_SAMPLES
+#define GI_SAMPLES 0
+
+#undef REFLECTION_SAMPLES
+#define REFLECTION_SAMPLES 0
+
+#endif
+
+#if defined(GI_ONLY)
+
+#undef VOLUME_GI_SAMPLES
+#define VOLUME_GI_SAMPLES 0
+
+#undef VOLUME_SHADOW_SAMPLES
+#define VOLUME_SHADOW_SAMPLES 0
+
+#undef VOLUME_STEPS
+#define VOLUME_STEPS 0
+
+#undef REFLECTION_SAMPLES
+#define REFLECTION_SAMPLES 0
+
+#endif
+
+//
+// I/O
+//
+cbuffer _RTSceneData {
+    float _RTSceneSeed;
+    float _RTStochastic;
+    uint _RTObjectCount;
+    uint _RTLightCount;
+    float4 _RTFogParams;
+    uint2 _RTTileOffset;
+};
+
+//StructuredBuffer<rt_scene_t> _RTSceneData;
+StructuredBuffer<rt_camera_t> _RTCameraData;
+StructuredBuffer<rt_camera_t> _RTLastCameraData;
+
+StructuredBuffer<rt_vertex_t> _RTVertexBlob;
+StructuredBuffer<rt_index_t> _RTIndexBlob;
+StructuredBuffer<rt_object_t> _RTObjectBlob;
+StructuredBuffer<rt_light_t> _RTLightBlob;
+
+RWTexture2D<float4> _RTColorOutput;
+RWTexture2D<float4> _RTDataOutput;
+
+int _TemporalSamples;
+
+#ifdef _USE_IBL_BRDF
+SamplerState sampler_IBL_BRDF;
+Texture2D<float4> _IBL_BRDF;
+#endif
+
+#ifdef _USE_RT_NOISE_TEX
+SamplerState point_repeat_sampler;
+Texture2D<float4> _RTNoiseTex;
+#endif
+
+//
+// Tracing
+//
+bool trace_fragment(ray_t ray, out fragment_t fragment) {
+    fragment = (fragment_t)0;
+    fragment.position.w = RT_FAR_PLANE;
+
+    for (uint o = 0; o < _RTObjectCount; o++) {
+        rt_object_t object = _RTObjectBlob[o];
+
+        // Object relative ray
+        ray_t object_ray = ray;
+        object_ray.origin = mul(object.trs_inverse, float4(ray.origin, 1));
+        object_ray.direction = mul(object.trs_inverse, float4(ray.direction, 0));
+
+        // TODO: AABB for other shapes?
+
+        if (object.shape_data.w == RT_ESHAPE_MESH) {
+            if (!ray_aabb_intersect(object_ray, object.aabb, 0, RT_FAR_PLANE)) {
+                continue;
+            }
+
+            rt_mesh_t mesh = object.mesh;
+
+            uint origin = mesh.index_offset;
+            uint edge = mesh.index_offset + mesh.index_count;
+
+            for (uint i = origin; i < edge; i++) {
+                rt_index_t index = _RTIndexBlob[i];
+
+                rt_vertex_t v0 = _RTVertexBlob[index.v.x];
+                rt_vertex_t v1 = _RTVertexBlob[index.v.y];
+                rt_vertex_t v2 = _RTVertexBlob[index.v.z];
+
+                // Does this help?
+                //if (dot(v0.normal, object_ray.direction) > 0 && dot(v1.normal, object_ray.direction) > 0 && dot(v2.normal, object_ray.direction) > 0)
+                //    continue;
+
+                tri_intersection_t intersect;
+                if (ray_triangle_intersect(object_ray, v0.position, v1.position, v2.position, intersect)) {
+                    //float depth = saturate(length(intersect.t) / RT_FAR_PLANE);
+                    //bool closer = depth < fragment.z_cull;
+
+                    bool closer = intersect.t < fragment.position.w;
+
+                    if (closer) {
+                        fragment.position.w = intersect.t;
+
+                        rt_vertex_t v = bary_interpolate(v0, v1, v2, intersect.u, intersect.v);
+
+                        v.position = mul(object.trs, float4(v.position, 1));
+                        v.normal = normalize(mul(transpose(object.trs_inverse), float4(v.normal, 0)).xyz);
+
+                        fragment.position.xyz = v.position;
+                        fragment.normal = v.normal;
+                        fragment.object = o;
+                    }
+                }
+            }
+        }
+        
+        if (object.shape_data.w == RT_ESHAPE_SPHERE) {
+            float3 origin = mul(object.trs, float4(0, 0, 0, 1));
+            fragment_t fragment_dupe = fragment;
+            if (ray_sphere_intersect(ray, fragment_dupe, float4(origin, object.shape_data.x), 0, RT_FAR_PLANE)) {
+                if (fragment_dupe.position.w < fragment.position.w) {
+                    fragment = fragment_dupe;
+                    fragment.object = o;
+                }
+            }
+        }
+    }
+
+    fragment.position.w = saturate(fragment.position.w / RT_FAR_PLANE);
+    return fragment.position.w < 1.0;
+}
+
+struct shade_out_t {
+    half3 diffuse;
+    half3 glow;
+};
+
+shade_out_t shade_fragment(ray_t ray, fragment_t fragment, inout uint seed) {
+    shade_out_t output = (shade_out_t)0;
+    float3 color = 0;
+    
+    float3 position = fragment.position;
+    float3 view = -ray.direction;
+    float3 normal = fragment.normal;
+    float3 reflection = reflect(-view, normal);
+    
+    float n_dot_v = saturate(dot(normal, view));
+    float light_dist_sqr = 0;
+
+    rt_material_t material = _RTObjectBlob[fragment.object].material;
+
+    for (uint l = 0; l < _RTLightCount; l++) {
+        rt_light_t light = _RTLightBlob[l];
+
+        float3 light_dir = 0;
+        float atten = 0;
+        float cone_angle = 0;
+
+        if (light.type == RT_ELIGHT_SUN) {
+            light_dir = -light.position;
+            atten = 1;
+            light_dist_sqr = 99999;
+            cone_angle = light.radius;
+        } else {
+            float3 light_vec = light.position - fragment.position;
+            
+            light_dist_sqr = dot(light_vec, light_vec);
+            float light_dist = sqrt(light_dist_sqr);
+
+            light_dir = light_vec / light_dist;
+
+            float light_range = light.range;
+            float light_range_sqr = light_range * light_range;
+
+            float sin_sigma_sqr = min(light_range_sqr / light_dist_sqr, 0.9999f);
+            float cos_theta = saturate(dot(normal, light_dir));
+
+            atten = sphere_light(cos_theta, sin_sigma_sqr);
+            cone_angle = get_cone_angle(position, light_dir, light.position, light.radius);
+
+            if (light.type == RT_ELIGHT_SPOT) {
+                float cone = dot(light_dir, light.forward) - light.cosines.y;
+                atten *= saturate(cone * light.cosines.z);
+            }
+        }
+
+        if (atten > 0) {
+            float3 halfway = normalize(light_dir + view);
+
+            float n_dot_l = saturate(dot(normal, light_dir));
+            float n_dot_h = saturate(dot(normal, halfway));
+
+            float3 bias = fragment.normal * RT_SHADOW_BIAS;
+
+            float shadow = 0;
+
+            // Check if this light isn't in range
+            for (int s = 0; s < SHADOW_SAMPLES; s++) {
+                float3 jittered = rand_cone(seed, light_dir, cone_angle);
+
+                ray_t shadow_ray = ray_new(position - bias, jittered);
+                fragment_t shadow_frag;
+
+                if (trace_fragment(shadow_ray, shadow_frag)) {
+                    float3 shadow_vec = fragment.position - shadow_frag.position;
+                    shadow += dot(shadow_vec, shadow_vec) <= light_dist_sqr;
+                }
+            }
+
+            shadow = 1.0 - (shadow / SHADOW_SAMPLES);
+
+            float roughness = remap(material.roughness, 0.04, 1.0);
+            float metallic = remap(material.metallic, 0.04, 1.0);
+            float3 albedo = material.color;
+
+            float3 f0 = lerp((0.04).xxx, albedo, metallic);
+            float3 f = fresnel_schlick_roughness(n_dot_h, f0, roughness);
+
+            // https://learnopengl.com/PBR/Lighting
+            float ndf = distribution_ggx(normal, halfway, roughness);
+            float g = geometry_smith(normal, view, light_dir, roughness);
+
+            float3 numerator = ndf * g * f;
+            float denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
+
+            float3 radiance = light.color;
+            atten *= n_dot_l * shadow;
+
+            float3 specular = numerator / denominator;
+            float3 k_s = f;
+            float3 k_d = (1.0).xxx - k_s;
+            k_d *= 1.0 - metallic;
+
+            float3 shaded = (k_d * albedo / PI + specular) * radiance * atten;
+
+            color += shaded;
+        }
+    }
+
+    output.diffuse = color;
+    output.glow = material.glow;
+
+    return output;
+}
+
+inline float sto_noise(float2 coord) {
+    //return rand(coord);
+    return fmod(52.9829189f * fmod(0.06711056f * coord.x + 0.00583715f * coord.y, 1.0f), 1.0f);
+}
+
+inline float mie_scattering(float cosTheta, float G = 0.7) {
+    //return 1;
+    return (1.0f - G * G) / (4.0f * PI * pow(1.0f + G * G - 2.0f * G * cosTheta, 1.5f));
+}
+
+float3 sample_gi(inout uint seed, ray_t ray, fragment_t fragment, shade_out_t root_shade) {
+    float3 gi_color = 0;
+
+    rt_material_t material = _RTObjectBlob[fragment.object].material;
+
+    [unroll]
+    for (int s = 0; s < GI_SAMPLES; s++) {
+        float3 gi_glow_bounce = material.color;
+        shade_out_t gi_shaded = root_shade;
+
+        ray_t last_gi_ray = ray;
+        fragment_t last_gi_fragment = fragment;
+
+        float3 gi_sample = 0;
+
+        [unroll]
+        for (int b = 0; b < GI_BOUNCES; b++) {
+            float3 reflected = reflect(last_gi_ray.direction, last_gi_fragment.normal);
+            
+            float3 cone_dir = last_gi_fragment.normal;
+
+            if (any(cone_dir.xy == 0) && cone_dir.z != 0)
+                cone_dir.x += 0.0000001;
+
+            material = _RTObjectBlob[last_gi_fragment.object].material;
+            float cone_angle = material.roughness;
+            cone_angle = PI;
+
+            float3 gi_biased = last_gi_fragment.position + cone_dir * RT_NORMAL_BIAS;
+            float3 dir = rand_cone(seed, cone_dir, cone_angle);
+
+            ray_t scatter = ray_new(gi_biased, dir);
+            fragment_t scatter_fragment;
+
+            if (trace_fragment(scatter, scatter_fragment)) {
+                shade_out_t shaded = shade_fragment(scatter, scatter_fragment, seed);
+
+                float3 diffuse = gi_shaded.diffuse * shaded.diffuse;
+                float3 glow = gi_glow_bounce * shaded.glow + gi_shaded.glow;
+
+                // Decay the color exponentially
+                float3 scatter_vec = scatter.origin - scatter_fragment.position;
+
+                //float decay = dot(scatter_vec, scatter_vec);
+                //float decay = length(scatter_vec);
+
+                float scatter_len = length(scatter_vec);
+                float3 scatter_dir = scatter_vec / scatter_len;
+
+                float dist_falloff = 0;
+                float ang = saturate(dot(-scatter_dir, cone_dir));
+
+                float diffuse_decay = 1 / max(dist_falloff, 1);
+                float glow_decay = ang / max(dist_falloff, 1);
+
+                //decay = pow(saturate(1.0 / decay), RT_GI_POW);
+                //decay = max(decay, 1);
+                //decay = 1;
+
+                //diffuse /= decay;
+                //glow /= decay;
+
+                diffuse *= diffuse_decay;
+                glow *= glow_decay;
+
+                //gi_color += final_scatter / GI_SAMPLES;
+                gi_sample = diffuse + glow;
+
+                material = _RTObjectBlob[scatter_fragment.object].material;
+                
+                gi_shaded.diffuse = diffuse;
+                gi_shaded.glow = glow;
+                gi_glow_bounce *= material.color;
+
+                last_gi_ray = scatter;
+                last_gi_fragment = scatter_fragment;
+            } else {
+                break;
+            }
+        }
+
+        gi_color += gi_sample / GI_SAMPLES;
+        //gi_color = gi_sample;
+    }
+
+    return gi_color;
+}
+
+float3 sample_fog(inout uint seed, float3 start, float3 end) {
+    float3 color = 0;
+
+    float3 volume_vec = end - start;
+    float volume_norm = length(volume_vec) / VOLUME_FAR;
+    ray_t ray = ray_new(start, normalize(volume_vec));
+
+    for (int v = 0; v < VOLUME_STEPS; v++) {
+        float d = float(v + rand_next(seed)) / VOLUME_STEPS;
+        float3 sample = lerp(start, end, d);
+
+        float3 fog = 0;
+
+        for (uint l = 0; l < _RTLightCount; l++) {
+            rt_light_t light = _RTLightBlob[l];
+
+            float3 light_dir = 0;
+            float atten = 0;
+            float light_dist_sqr = 0;
+            float cone_angle = 0;
+
+            if (light.type == RT_ELIGHT_SUN) {
+                light_dir = -light.position;
+                atten = 1;
+                light_dist_sqr = 99999;
+                cone_angle = light.radius;
+            } else {
+                float3 light_vec = light.position - sample;
+
+                light_dist_sqr = dot(light_vec, light_vec);
+                float light_dist = sqrt(light_dist_sqr);
+
+                light_dir = light_vec / light_dist;
+
+                float light_range = light.range;
+                float light_range_sqr = light_range * light_range;
+
+                float sin_sigma_sqr = min(light_range_sqr / light_dist_sqr, 0.9999f);
+                float cos_theta = 1;
+
+                atten = sphere_light(cos_theta, sin_sigma_sqr);
+                cone_angle = get_cone_angle(sample, light_dir, light.position, light.radius);
+
+                if (light.type == RT_ELIGHT_SPOT) {
+                    float cone = dot(light_dir, light.forward) - light.cosines.y;
+                    atten *= saturate(cone * light.cosines.z);
+                }
+            }
+
+            if (atten > 0) {
+                float shadow = 0;
+                for (int s = 0; s < VOLUME_SHADOW_SAMPLES; s++) {
+                    float3 jittered = rand_cone(seed, light_dir, cone_angle);
+
+                    ray_t shadow_ray = ray_new(sample, jittered);
+                    fragment_t shadow_frag;
+
+                    if (trace_fragment(shadow_ray, shadow_frag)) {
+                        float3 shadow_vec = sample - shadow_frag.position;
+                        shadow += dot(shadow_vec, shadow_vec) <= light_dist_sqr;
+                    }
+                }
+
+                shadow = 1.0 - (shadow / VOLUME_SHADOW_SAMPLES);
+
+                float cos_theta = dot(light_dir, ray.direction);
+
+                if (VOLUME_FOG_SCATTER > 0) {
+                    atten *= mie_scattering(cos_theta, VOLUME_FOG_SCATTER);
+                }
+
+                fog += saturate(shadow) * saturate(atten) * light.color * VOLUME_COLOR;
+            }
+        }
+
+        [unroll]
+        for (int s = 0; s < VOLUME_GI_SAMPLES; s++) {
+            float3 gi_glow_bounce = VOLUME_COLOR;
+            shade_out_t gi_shaded = (shade_out_t)0;
+
+            gi_shaded.diffuse = VOLUME_COLOR;
+
+            ray_t last_gi_ray = ray_new(sample, ray.direction);
+
+            float3 gi_sample = 0;
+
+            [unroll]
+            for (int b = 0; b < VOLUME_GI_BOUNCES; b++) {
+                float3 cone_dir = last_gi_ray.direction;
+
+                if (any(cone_dir.xy == 0) && cone_dir.z != 0)
+                    cone_dir.x += 0.0000001;
+
+                float cone_angle = PI;
+
+                float3 gi_biased = last_gi_ray.origin;
+
+                //float sig = floor((rand_next(seed) - 0.5) * 2.0);
+
+                //if (sig == 0)
+                //    sig = 1;
+
+                float sig = 1;
+
+                float3 dir = rand_cone(seed, cone_dir, cone_angle) * sig;
+
+                ray_t scatter = ray_new(gi_biased, dir);
+                fragment_t scatter_fragment;
+
+                if (trace_fragment(scatter, scatter_fragment)) {
+                    shade_out_t shaded = shade_fragment(scatter, scatter_fragment, seed);
+
+                    float3 diffuse = gi_shaded.diffuse * shaded.diffuse;
+                    float3 glow = gi_glow_bounce * shaded.glow + gi_shaded.glow;
+
+                    // Decay the color exponentially
+                    float3 scatter_vec = scatter.origin - scatter_fragment.position;
+
+                    //float decay = dot(scatter_vec, scatter_vec);
+                    //float decay = length(scatter_vec);
+
+                    float scatter_len = length(scatter_vec);
+                    float3 scatter_dir = scatter_vec / scatter_len;
+
+                    float dist_falloff = 0;
+                    
+                    float ang = saturate(dot(-scatter_dir, cone_dir));
+
+                    float diffuse_decay = 1 / max(dist_falloff, 1);
+                    float glow_decay = ang / max(dist_falloff, 1);
+                    
+                    float cos_theta = dot(scatter.direction, last_gi_ray.direction);
+                    float mie = 1;
+                    
+                    if (VOLUME_FOG_SCATTER > 0) {
+                        mie = mie_scattering(cos_theta, VOLUME_FOG_SCATTER);
+                    }
+
+                    //decay = pow(saturate(1.0 / decay), RT_GI_POW);
+                    //decay = max(decay, 1);
+                    //decay = 1;
+
+                    //diffuse /= decay;
+                    //glow /= decay;
+
+                    diffuse *= diffuse_decay;
+                    glow *= glow_decay;
+
+                    //gi_color += final_scatter / GI_SAMPLES;
+                    gi_sample = diffuse + glow;
+                    //gi_sample = mie_scattering(cos_theta, VOLUME_FOG_SCATTER);
+                    
+                    rt_material_t material = _RTObjectBlob[scatter_fragment.object].material;
+
+                    gi_shaded.diffuse = diffuse;
+                    gi_shaded.glow = glow;
+                    gi_glow_bounce *= material.color;
+
+                    last_gi_ray = scatter;
+                } else {
+                    break;
+                }
+            }
+
+            fog += gi_sample / VOLUME_GI_SAMPLES;
+        }
+
+        color += (fog * volume_norm) / VOLUME_STEPS;
+    }
+
+    return color;
+}
+
+//
+// HelloTriangle
+//
+[numthreads(COMMON_THREAD_SIZE, COMMON_THREAD_SIZE, 1)]
+void HelloTriangleKernel(uint3 id : SV_DispatchThreadID) {
+    // Calculate the UV
+    uint width, height;
+    _RTColorOutput.GetDimensions(width, height);
+
+    uint2 actual_id = id.xy + _RTTileOffset;
+
+    float2 view = (id_to_uv(actual_id, uint2(width, height)) - 0.5) * 2.0;
+
+    // Stochasic sampling
+    #ifdef STOCHASIC
+
+    #if _USE_RT_NOISE_TEX
+    uint noise_width, noise_height;
+    _RTNoiseTex.GetDimensions(noise_width, noise_height);
+
+    float base_noise = _RTNoiseTex[actual_id % float2(noise_width, noise_height)].r;
+    #else
+    float base_noise = sto_noise(actual_id + _RTSceneSeed.x / 2000.0);
+    //bool noised = sto_noise(id.xy + _RTSceneSeed.xx) < _RTStochastic;
+    #endif
+
+    float wrap_noise = frac(base_noise + (_RTSceneSeed.x * GOLDEN_RATIO_CONJUGATE));
+    //wrap_noise = base_noise;
+    bool noised = wrap_noise > _RTStochastic;
+
+    //_RTColorOutput[id.xy] = wrap_noise.xxxx;
+
+    if (noised) {
+        return;
+    } else {
+        //return;
+    }
+    
+    #endif
+
+    uint seed = rand_seed(rand_seed(id.x, id.y), _RTSceneSeed);
+
+    // Get our camera
+    //rt_camera_t last_camera = _RTLastCameraData[0];
+    rt_camera_t camera = _RTCameraData[0];
+
+    // Hit a triangle?
+    // We jitter the view a bit to provide sub-pixel AA for temporal sampling
+    ray_t ray;
+    
+    {
+        #ifdef _TEMPORAL_SAMPLING
+        float2 view_jitter = view + rand_dir(seed, 1.0 / float2(width, height));
+        #else
+        float2 view_jitter = view;
+        #endif
+
+        ray = ray_from_camera(camera, view_jitter);
+    }
+
+    float3 color = simple_sky(ray);
+
+    float3 volume_end = ray.origin + ray.direction * VOLUME_FAR;
+
+    fragment_t fragment;
+    if (trace_fragment(ray, fragment)) {
+        shade_out_t shaded = shade_fragment(ray, fragment, seed);
+        color = shaded.diffuse + shaded.glow;
+
+        rt_material_t frag_material = _RTObjectBlob[fragment.object].material;
+
+        [unroll]
+        for (int r = 0; r < REFLECTION_SAMPLES; r++) {
+            ray_t last_reflect_ray = ray;
+            fragment_t last_reflect_frag = fragment; 
+            rt_material_t last_frag_material = _RTObjectBlob[fragment.object].material;
+
+            float3 reflect_bounce = frag_material.color;
+
+            [unroll]
+            for (int b = 0; b < REFLECTION_BOUNCES; b++) {
+                float3 cone_incoming = last_reflect_ray.direction;
+                float3 cone_normal = last_reflect_frag.normal;
+
+                float3 cone_dir = reflect(cone_incoming, cone_normal);
+
+                if (any(cone_dir.xy == 0) && cone_dir.z != 0)
+                    cone_dir.x += 0.0000001;
+
+                // cone_incoming is negative since it represents a view vector
+                float cos_theta = saturate(dot(-cone_incoming, cone_normal));
+                
+                float roughness = last_frag_material.roughness;
+                float metallic = last_frag_material.metallic;
+                float3 mat_color = reflect_bounce;
+                
+                float r2 = roughness;
+                r2 *= r2;
+
+                float scatter = r2 * cos_theta * PI;
+
+                float3 scatter_dir = rand_cone(seed, cone_dir, scatter);
+                float3 biased = last_reflect_frag.position + cone_normal * RT_NORMAL_BIAS;
+
+                ray_t reflected = ray_new(biased, scatter_dir);
+                fragment_t reflected_fragment;
+
+                float3 output = 0;
+                bool break_after = false;
+
+                float3 reflected_f0 = lerp((0.04).xxx, mat_color, metallic);
+                float3 reflected_f = fresnel_schlick_roughness(cos_theta, reflected_f0, roughness);
+
+                #ifndef _USE_IBL_BRDF
+                float3 precomp = reflected_f;
+                #else
+                float2 brdf = _IBL_BRDF.SampleLevel(sampler_IBL_BRDF, float2(cos_theta, roughness), 0);
+                float3 precomp = reflected_f * brdf.x + brdf.y;
+                #endif
+
+                #ifdef SAMPLE_FOG_IN_REFLECTION
+                float3 fog_end = last_reflect_frag.position + scatter_dir * VOLUME_FAR;
+                #endif
+
+                if (trace_fragment(reflected, reflected_fragment)) {
+                    shade_out_t shaded = shade_fragment(reflected, reflected_fragment, seed);
+
+                    output = shaded.diffuse + shaded.glow;
+
+                    #ifdef SAMPLE_GI_IN_REFLECTION
+                    output += sample_gi(seed, reflected, reflected_fragment, shaded);
+                    #endif
+
+                    #ifdef SAMPLE_FOG_IN_REFLECTION
+                    fog_end = reflected_fragment.position;
+                    #endif
+                }
+                else {
+                    output = simple_sky(reflected);
+                    break_after = true;
+                }
+
+                #ifdef SAMPLE_FOG_IN_REFLECTION
+                if (b <= REFLECTION_FOG_BOUNCE_CAP || REFLECTION_FOG_BOUNCE_CAP <= -1) {
+                    output += sample_fog(seed, biased, fog_end);
+                }
+                #endif
+
+                output *= precomp;
+
+                color += output / REFLECTION_SAMPLES;
+
+                if (break_after)
+                    break;
+
+                last_reflect_ray = reflected;
+                last_reflect_frag = reflected_fragment;
+                last_frag_material = _RTObjectBlob[reflected_fragment.object].material;
+
+                reflect_bounce *= last_frag_material.color;
+            }
+        }
+
+        #ifndef GI_ONLY
+        color += sample_gi(seed, ray, fragment, shaded);
+        #else
+        color = sample_gi(seed, ray, fragment, shaded);
+        #endif
+
+        volume_end = fragment.position;
+    }
+
+    #ifndef FOG_ONLY
+    color += sample_fog(seed, ray.origin, volume_end);
+    #else
+    color = sample_fog(seed, ray.origin, volume_end);
+    #endif
+
+#ifdef _TEMPORAL_SAMPLING
+    float4 back_data = _RTDataOutput[actual_id];
+    float4 back_sample = _RTColorOutput[actual_id];
+
+    float back_depth = back_data.r / back_data.a;
+
+    // If we've sampled more than X times, quit
+    if (back_sample.w >= _TemporalSamples)
+        return;
+
+    back_sample.rgb += color / _TemporalSamples;
+    back_sample.a += 1;
+
+    back_data.r += fragment.position.w / _TemporalSamples;
+    back_data.a = back_sample.a;
+
+    _RTDataOutput[actual_id] = back_data;
+    _RTColorOutput[actual_id] = back_sample;
+#else
+    _RTDataOutput[actual_id] = float4(fragment.position.w, 0, 0, 1);
+    _RTColorOutput[actual_id] = float4(color, 1);
+#endif
+}

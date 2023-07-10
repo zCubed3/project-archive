@@ -1,0 +1,5 @@
+discord.py
+gtts
+jsons
+openai
+pynacl

@@ -1,0 +1,17 @@
+# Prevent vim sessions from being stored
+*.vim
+
+# Prevent cmake and builds
+cmake*/
+build*/
+bin*/
+.cache*/
+
+# Raw_files
+*.blend*
+
+# Prevent configuration files from being carried over
+compile_commands.json
+.MANTA_*
+
+.idea/

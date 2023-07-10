@@ -1,0 +1,194 @@
+﻿//
+// Kernels
+//
+#pragma kernel BloomPreprocess
+#pragma kernel BloomDownsample
+#pragma kernel BloomUpsample
+#pragma kernel PostProcess
+
+#include "Include/CommonUtils.hlsl"
+
+float4 _BloomParams;
+
+Texture2D<float4> _SampleInput;
+Texture2D<float4> _SampleInputLowMip;
+RWTexture2D<float4> _Output;
+
+Texture2D<float4> _BloomTexture;
+
+SamplerState sampler_LinearClamp;
+
+half3 ApplyACES(half3 input) {
+    half3 x = input * 1.8;
+
+    float3x3 m1 = transpose(float3x3(
+        0.59719, 0.07600, 0.02840,
+        0.35458, 0.90834, 0.13383,
+        0.04823, 0.01566, 0.83777
+    ));
+
+    float3x3 m2 = transpose(float3x3(
+        1.60475, -0.10208, -0.00327,
+        -0.53108,  1.10813, -0.07276,
+        -0.07367, -0.00605,  1.07602
+    ));
+
+    float3 v = mul(m1, x);
+
+    float3 a = v * (v + 0.0245786) - 0.000090537;
+    float3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+
+    return saturate(mul(m2, a / b));
+}
+
+[numthreads(COMMON_THREAD_SIZE, COMMON_THREAD_SIZE, 1)]
+void BloomPreprocess(uint3 id : SV_DispatchThreadID) {
+    uint width, height;
+    _Output.GetDimensions(width, height);
+
+    float2 uv = id_to_uv(id.xy, uint2(width, height));
+
+    _SampleInput.GetDimensions(width, height);
+    float2 texelSize = 1.0 / float2(width, height);
+
+    half4 A = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(-1.0, -1.0), 0);
+    half4 B = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(0.0, -1.0), 0);
+    half4 C = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(1.0, -1.0), 0);
+    half4 D = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(-0.5, -0.5), 0);
+    half4 E = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(0.5, -0.5), 0);
+    half4 F = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(-1.0, 0.0), 0);
+    half4 G = _SampleInput.SampleLevel(sampler_LinearClamp, uv, 0);
+    half4 H = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(1.0, 0.0), 0);
+    half4 I = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(-0.5, 0.5), 0);
+    half4 J = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(0.5, 0.5), 0);
+    half4 K = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(-1.0, 1.0), 0);
+    half4 L = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(0.0, 1.0), 0);
+    half4 M = _SampleInput.SampleLevel(sampler_LinearClamp, uv + texelSize * float2(1.0, 1.0), 0);
+
+    half2 div = (1.0 / 4.0) * half2(0.5, 0.125);
+
+    half4 o = (D + E + I + J) * div.x;
+    o += (A + B + G + F) * div.y;
+    o += (B + C + H + G) * div.y;
+    o += (F + G + L + K) * div.y;
+    o += (G + H + M + L) * div.y;
+
+    half4 color = o;
+
+    // Clamp colors to positive once in prefilter. Encode can have a sqrt, and sqrt(-x) == NaN. Up/Downsample passes would then spread the NaN.
+    color = max(color, 0);
+    
+    _Output[id.xy] = color;
+}
+
+[numthreads(COMMON_THREAD_SIZE, COMMON_THREAD_SIZE, 1)]
+void BloomDownsample(uint3 id : SV_DispatchThreadID) {
+    uint width, height;
+    _Output.GetDimensions(width, height);
+
+    //float2 uv = id.xy / float2(width, height);
+    float2 uv = id_to_uv(id.xy, uint2(width, height));
+
+    //https://www.froyok.fr/blog/2021-12-ue4-custom-bloom/
+    const float2 COORDS[13] = {
+        float2( -1.0f,  1.0f ), float2(  1.0f,  1.0f ),
+        float2( -1.0f, -1.0f ), float2(  1.0f, -1.0f ),
+
+        float2(-2.0f, 2.0f), float2( 0.0f, 2.0f), float2( 2.0f, 2.0f),
+        float2(-2.0f, 0.0f), float2( 0.0f, 0.0f), float2( 2.0f, 0.0f),
+        float2(-2.0f,-2.0f), float2( 0.0f,-2.0f), float2( 2.0f,-2.0f)
+    };
+
+
+    const float WEIGHTS[13] = {
+        // 4 samples
+        // (1 / 4) * 0.5f = 0.125f
+        0.125f, 0.125f,
+        0.125f, 0.125f,
+
+        // 9 samples
+        // (1 / 9) * 0.5f
+        0.0555555f, 0.0555555f, 0.0555555f,
+        0.0555555f, 0.0555555f, 0.0555555f,
+        0.0555555f, 0.0555555f, 0.0555555f
+    };
+
+    _SampleInput.GetDimensions(width, height);
+    float4 texelSize = float4(1.0 / float2(width, height), 0, 0);
+    texelSize.zw = texelSize.xy;
+
+    half4 color = 0;
+
+    [unroll]
+    for( int i = 0; i < 13; i++ )
+    {
+        float2 currentUV = uv + COORDS[i] * texelSize.xy;
+
+        //float bias = currentUV.x > 1 || currentUV.x < 0 || currentUV.y > 1 || currentUV.y < 0;
+        float bias = 0;
+
+        color += WEIGHTS[i] * _SampleInput.SampleLevel(sampler_LinearClamp, currentUV, 0) * (1 - bias);
+    }
+
+    _Output[id.xy] = color;
+}
+
+[numthreads(COMMON_THREAD_SIZE, COMMON_THREAD_SIZE, 1)]
+void BloomUpsample(uint3 id : SV_DispatchThreadID) {
+    uint width, height;
+    _Output.GetDimensions(width, height);
+
+    //float2 uv = id.xy / float2(width, height);
+    float2 uv = id_to_uv(id.xy, uint2(width, height));
+
+    //https://www.froyok.fr/blog/2021-12-ue4-custom-bloom/
+    const float2 COORDS[9] = {
+        float2( -1.0f,  1.0f ), float2(  0.0f,  1.0f ), float2(  1.0f,  1.0f ),
+        float2( -1.0f,  0.0f ), float2(  0.0f,  0.0f ), float2(  1.0f,  0.0f ),
+        float2( -1.0f, -1.0f ), float2(  0.0f, -1.0f ), float2(  1.0f, -1.0f )
+    };
+
+    const float WEIGHTS[9] = {
+        0.0625f, 0.125f, 0.0625f,
+        0.125f,  0.25f,  0.125f,
+        0.0625f, 0.125f, 0.0625f
+    };
+
+    half4 color = 0;
+
+    //_SampleInput.GetDimensions(width, height);
+    float4 texelSize = float4(1.0 / float2(width, height), 0, 0);
+    texelSize.zw = texelSize.xy;
+
+    [unroll]
+    for( int i = 0; i < 9; i++ )
+    {
+        float2 currentUV = uv + COORDS[i] * texelSize.xy;
+        
+        //float bias = currentUV.x > 1 || currentUV.x < 0 || currentUV.y > 1 || currentUV.y < 0;
+        float bias = 0;
+
+        color += WEIGHTS[i] * _SampleInputLowMip.SampleLevel(sampler_LinearClamp, currentUV, 0) * (1 - bias);
+    }
+
+    half4 highMip = _SampleInput.SampleLevel(sampler_LinearClamp, uv, 0);
+
+    _Output[id.xy] = lerp(highMip, color, _BloomParams.x);
+}
+
+[numthreads(COMMON_THREAD_SIZE, COMMON_THREAD_SIZE, 1)]
+void PostProcess(uint3 id : SV_DispatchThreadID) {
+    uint width, height;
+    _Output.GetDimensions(width, height);
+
+    float2 uv = id_to_uv(id.xy, uint2(width, height));
+
+    //half4 scene = _SampleInput.SampleLevel(sampler_LinearClamp, uv, 0);
+    //half4 bloom = _BloomTexture.SampleLevel(sampler_LinearClamp, uv, 0);
+
+    half4 scene = _SampleInput[id.xy];
+    half4 bloom = _BloomTexture[id.xy];
+
+    half4 mixed = lerp(scene, bloom, _BloomParams.y);
+    _Output[id.xy] = half4(ApplyACES(mixed), 1);
+}
