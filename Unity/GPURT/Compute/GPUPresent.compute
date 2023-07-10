@@ -1,0 +1,18 @@
+﻿//
+// Kernels
+//
+#pragma kernel Present
+
+#include "Include/CommonUtils.hlsl"
+
+Texture2D<float4> _SampleInput;
+RWTexture2D<float4> _SampleOutput;
+
+[numthreads(COMMON_THREAD_SIZE, COMMON_THREAD_SIZE, 1)]
+void Present(uint3 id : SV_DispatchThreadID) {
+    float4 pix = _SampleInput[id.xy];
+    //pix.xyz /= max(pix.w, 1);
+    pix.w = 1;
+
+    _SampleOutput[id.xy] = pix;
+}

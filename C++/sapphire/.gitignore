@@ -1,0 +1,25 @@
+# Prevent vim sessions from being stored
+*.vim
+
+# Prevent cmake and builds
+cmake*/
+build*/
+bin*/
+.cache*/
+
+# Raw files
+*.blend*
+
+# Script generated files
+*.gen.h
+
+# Prevent configuration files from being carried over
+compile_commands.json
+.AGE_*
+
+# IDEs
+.idea/
+.vs
+
+# Vulkan shader binaries
+*.spv

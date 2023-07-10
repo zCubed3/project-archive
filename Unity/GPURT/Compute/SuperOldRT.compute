@@ -1,0 +1,388 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Textures
+RWTexture2D<float4> Result;
+
+//
+// Structs
+//
+struct Triangle {
+    float3 v1, v2, v3;
+    float3 n1, n2, n3;
+    float2 uv1, uv2, uv3;
+    float4 color;
+    float glossiness;
+    int textureIndex;
+};
+
+struct Mesh {
+    StructuredBuffer<Triangle> triangles;
+    //BoxAABB bounding;
+};
+
+struct RTLight
+{
+    float3 pos;
+    float strength, range;
+    float4 color;
+    uint type;
+};
+
+struct Ray
+{
+    float3 origin;
+    float3 direction;
+    
+    float4 energy;
+};
+
+// Buffers
+StructuredBuffer<Triangle> _WorldMeshVerts;
+StructuredBuffer<RTLight> _WorldLights;
+
+// Camera matrices
+float4x4 _CameraToWorldMatrix;
+float4x4 _WorldToCameraMatrix;
+float4x4 _InverseProjectionMatrix;
+
+// Params
+bool _HalfRes;
+bool _HalfResAlternate;
+
+// Ctors
+Ray CreateRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    
+    ray.origin = origin;
+    ray.direction = direction;
+    
+    ray.energy = float4(0, 0, 0, 0);
+    
+    return ray;
+}
+
+Ray CreateRayFromViewPoint(float2 vPoint)
+{
+    Ray ray;
+    ray.origin = mul(_CameraToWorldMatrix, float4(0, 0, 0, 1)).xyz;
+    
+    ray.direction = mul(_InverseProjectionMatrix, float4(vPoint, 0, 1)).xyz;
+    ray.direction = mul(_CameraToWorldMatrix, float4(ray.direction, 0));
+    ray.direction = normalize(ray.direction);
+    
+    ray.energy = float4(0, 0, 0, 0);
+
+    return ray;
+}
+
+// Ray intersections
+static const float Epsilon = 1e-8;
+
+bool TriangleRayIntersect(Ray ray, float3 v1, float3 v2, float3 v3, inout float3 t, inout float u, inout float v)
+{
+    float3 edge1, edge2;
+    
+    edge1 = v2 - v1;
+    edge2 = v3 - v1;
+    
+    float3 perpendicular;
+    float determinant;
+    
+    perpendicular = cross(ray.direction, edge2);
+    determinant = dot(edge1, perpendicular);
+    
+    // Ignore this face if it reaches near Epsilon
+    if (determinant < Epsilon)
+        return false;
+    
+    float ideterminant = 1.0 / determinant;
+
+    float3 tvec = ray.origin - v1;
+
+    u = dot(tvec, perpendicular) * ideterminant;
+    
+    if (u < 0.0f || u > 1.0f)
+        return false;
+    
+    float3 q = cross(tvec, edge1);
+    
+    v = dot(ray.direction, q) * ideterminant;
+
+    if (v < 0.0f || u + v > 1.0f)
+        return false;
+
+    t = dot(edge2, q) * ideterminant;
+    
+    if (dot(edge2, q) * ideterminant > Epsilon)
+        return true;
+    
+    return false;
+}
+
+// Sky hemispheres
+float4 _UpperHemisphereColor;
+float4 _LowerHemisphereColor;
+
+float4 CalculateSkyColor(float3 pos)
+{
+    float yTan = atan(pos.y);
+    
+    if (yTan >= 0)
+        return _UpperHemisphereColor * pow(yTan, 0.45);
+    else
+        return _LowerHemisphereColor * pow(-yTan, 0.5);
+    
+}
+
+//
+// Noiser
+//
+float2 _SobelCoords;
+
+float rand(float2 st) { return frac(sin(dot(st.xy, float2(12.9898, 78.233))) * 43758.5453123); }
+float rand(float n) { return frac(sin(n) * 43758.5453123); }
+
+//
+// Shading
+//
+
+//https://imdoingitwrong.wordpress.com/tag/glsl/
+float SphereAtten(float3 position, float3 lightPosition, float3 normal, float range, float intensity) {
+    float r = range / 2;
+    float3 L = lightPosition - position;
+    float dist = length(L);
+    float d = max(dist - r, 0);
+    L /= dist;
+
+    float denom = d / r + 1;
+    float atten = 1 / (denom * denom);
+
+    float cutoff = 0.005;
+    atten = max((atten - cutoff / (1 - cutoff)) * intensity, 0);
+    return atten;
+}
+
+float4 CalculateLighting(float3 position, float3 normal) {
+    float4 lighting = (0.0).xxxx;
+    uint lights, stride;
+    _WorldLights.GetDimensions(lights, stride);
+
+    for (int light = 0; light < lights; light++) {
+        float3 direction = normalize(_WorldLights[light].pos - position);
+        float atten = 0;
+
+        if (_WorldLights[light].type == 1) {
+            direction = normalize(-_WorldLights[light].pos);
+            atten = _WorldLights[light].strength;
+        }
+
+        float lDot = saturate(dot(normal, direction));
+
+        if (_WorldLights[light].type == 2) {
+            atten = SphereAtten(position, _WorldLights[light].pos, normal, _WorldLights[light].range, _WorldLights[light].strength);
+        }
+
+        lighting += atten * lDot * _WorldLights[light].color;
+    }
+
+    return lighting;
+}
+
+float CalculateShadow(float3 position, float3 normal, float3 scatter) {
+    uint triCount, triStride;
+    _WorldMeshVerts.GetDimensions(triCount, triStride);
+
+    uint lights, stride;
+    _WorldLights.GetDimensions(lights, stride);
+
+    float shadow = 0;
+
+    float3 t;
+    float u, v;
+    float lastDistance = 25;
+    for (int tri = 0; tri < triCount; tri++) {
+        Triangle testTri = _WorldMeshVerts[tri];
+        for (int light = 0; light < lights; light++) {
+            float3 direction = normalize(_WorldLights[light].pos - position);
+
+            if (_WorldLights[light].type == 1) {
+                direction = normalize(-_WorldLights[light].pos);
+            }
+
+            float sourceDistance = distance(position, _WorldLights[light].pos);
+
+            if (_WorldLights[light].type == 1) {
+                sourceDistance = _WorldLights[light].range;
+            }
+
+            float3 offset = scatter * 0.002 * pow(sourceDistance, 2);
+            float3 solve = position + offset;
+
+            Ray lightRay = CreateRay(solve, direction);
+
+            if (TriangleRayIntersect(lightRay, testTri.v1, testTri.v2, testTri.v3, t, u, v)) {
+                float3 hPoint = (testTri.v1 * (1 - u - v)) + (testTri.v2 * u) + (testTri.v3 * v);
+                if (distance(position, hPoint) <= sourceDistance)
+                    shadow = 1;
+            }
+        }
+    }
+
+    return shadow;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID) {    
+    uint resX, resY;
+    Result.GetDimensions(resX, resY);
+    
+    // Create a UV for projecting rays from
+    float2 uv = float2((id.xy + float2(0.5, 0.5)) / float2(resX, resY));
+    uv *= 2;
+    uv -= 1;
+
+    // Now lets do some RT
+    Ray ray = CreateRayFromViewPoint(uv);
+    
+    float3 t;
+    float u, v;
+    
+    uint triCount, triStride;
+    
+    // Diffuse trace
+    _WorldMeshVerts.GetDimensions(triCount, triStride);
+    float3 hNormal;
+    float3 hPoint;
+    float2 hUV;
+    float hGloss;
+    
+    float lastDepth = 100;
+    
+    bool everHit;
+    for (int tri = 0; tri < triCount; tri++)
+    {
+        Triangle hitTri = _WorldMeshVerts[tri];
+        bool tempIntersect = TriangleRayIntersect(ray, _WorldMeshVerts[tri].v1, _WorldMeshVerts[tri].v2, _WorldMeshVerts[tri].v3, t, u, v);
+
+        float depth = distance(t, ray.origin);
+        
+        if (depth < lastDepth && tempIntersect)
+        {
+            hNormal = (hitTri.n1 * (1 - u - v)) + (hitTri.n2 * u) + (hitTri.n3 * v);
+            hNormal = normalize(hNormal);
+            
+            hUV = (hitTri.uv1 * (1 - u - v)) + (hitTri.uv2 * u) + (hitTri.uv3 * v);
+            
+            hPoint = (hitTri.v1 * (1 - u - v)) + (hitTri.v2 * u) + (hitTri.v3 * v);
+            
+            // TODO: Texture sampling
+            ray.energy = hitTri.color;
+            
+            hGloss = hitTri.glossiness;
+            lastDepth = depth;
+            everHit = true;
+        }
+    }
+    
+    // If this ray never hit anything just quit early
+    if (!everHit)
+    {
+        Result[id.xy] = CalculateSkyColor(ray.direction);
+        return;
+    }
+
+    // Abort early based on noiser
+    float sobel = rand(uv + _SobelCoords);
+    //Result[id.xy] = sobel.xxxx;
+    //return;
+    if (sobel >= 0.1) {
+        //Result[id.xy] = (0).xxxx;
+        return;
+    }
+
+    // Lighting pass
+    float3 scatter = float3(rand(uv + _SobelCoords + (0.1).xx), rand(uv + _SobelCoords + (0.2).xx), rand(uv + _SobelCoords + (0.3).xx));
+    scatter -= 0.5;
+    scatter *= 2;
+
+    float4 lighting = CalculateLighting(hPoint, hNormal);
+    float shadow = CalculateShadow(hPoint, hNormal, scatter);
+
+    ray.energy *= (1 - shadow) * lighting;
+    
+    // Reflection tracing
+    Ray reflectionRay = CreateRay(hPoint, reflect(ray.direction, hNormal) + scatter * pow(1 - hGloss, 2));
+    reflectionRay.energy = 1;
+    
+    bool everReflected = false;
+
+    float3 rPoint, rNormal;
+    
+    float lastDistance = 100;
+    if (hGloss != 0) {
+        for (int tri = 0; tri < triCount; tri++) {
+            Triangle testTri = _WorldMeshVerts[tri];
+            bool intersect = TriangleRayIntersect(reflectionRay, testTri.v1, testTri.v2, testTri.v3, t, u, v);
+            float travel = distance(reflectionRay.origin, t);
+
+            if (intersect && lastDistance > travel) {
+                rPoint = (testTri.v1 * (1 - u - v)) + (testTri.v2 * u) + (testTri.v3 * v);
+                rNormal = (testTri.n1 * (1 - u - v)) + (testTri.n2 * u) + (testTri.n3 * v);
+
+                reflectionRay.energy = testTri.color;
+                everReflected = true;
+            
+                lastDistance = travel;
+            }
+        }
+    }
+
+    if (!everReflected)
+        reflectionRay.energy = CalculateSkyColor(reflectionRay.direction);
+    else {
+        reflectionRay.energy *= CalculateLighting(rPoint, normalize(rNormal)) * (1 - CalculateShadow(rPoint, rNormal, scatter));
+    }
+
+    //
+    // Indirect scattering
+    //
+    Ray indirectRay = CreateRay(hPoint, reflect(ray.direction, normalize(scatter)));
+
+    float rDot = saturate(dot(indirectRay.direction, hNormal));
+    
+    if (rDot == 0)
+        indirectRay.direction *= -1;
+
+    Result[id.xy] = indirectRay.direction.xyzx;
+    //return;
+
+    float3 iPoint, iNormal;
+
+    lastDistance = 100;
+    for (int tri = 0; tri < triCount; tri++) {
+        Triangle testTri = _WorldMeshVerts[tri];
+        bool intersect = TriangleRayIntersect(indirectRay, testTri.v1, testTri.v2, testTri.v3, t, u, v);
+        float travel = distance(indirectRay.origin, t);
+
+        if (intersect && lastDistance > travel) {
+            lastDistance = travel;
+
+            iPoint = (testTri.v1 * (1 - u - v)) + (testTri.v2 * u) + (testTri.v3 * v);
+            iNormal = (testTri.n1 * (1 - u - v)) + (testTri.n2 * u) + (testTri.n3 * v);
+        
+            indirectRay.energy = (testTri.color / travel) * CalculateShadow(iPoint, iNormal, scatter);
+        }
+    }
+
+    indirectRay.energy *= CalculateLighting(iPoint, normalize(iNormal));
+
+    //Result[id.xy] = shadowRay.energy;
+    Result[id.xy] = lerp(ray.energy + indirectRay.energy, reflectionRay.energy, hGloss);
+    //Result[id.xy] = indirectRay.energy;
+    //Result[id.xy] = float2(noise(uv.xx * 1 + _SobelCoords), noise(uv.yy * 1 + _SobelCoords)).xyxx;
+    //Result[id.xy] = everReflected;
+    //Result[id.xy] = hNormal.xyzx;
+    //Result[id.xy] = hPoint.xyzx;
+}

@@ -1,0 +1,2 @@
+pub const RAD_TO_DEG : f32 = 57.2957795131f32;
+pub const DEG_TO_RAD : f32 = 0.01745329251f32;
